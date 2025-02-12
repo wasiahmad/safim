@@ -1,2 +1,3 @@
 tqdm
 datasets
+tree-sitter==0.20.4
