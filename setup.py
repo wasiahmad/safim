@@ -10,6 +10,10 @@ setup(
     description="",
     author="https://github.com/gonglinyuan/safim",
     packages=find_packages(),
+    package_data={
+        'safim': ['build/tree_sitter.so'],  # Include the .so file
+    },
+    include_package_data=True,
     install_requires=[
         str(r)
         for r in pkg_resources.parse_requirements(
