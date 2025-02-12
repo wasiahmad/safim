@@ -1,11 +1,9 @@
 import os
-
 import pkg_resources
 from setuptools import find_packages, setup
 
 setup(
     name="safim",
-    py_modules=["safim"],
     version="1.0",
     description="",
     author="https://github.com/gonglinyuan/safim",
