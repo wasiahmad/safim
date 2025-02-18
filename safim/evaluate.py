@@ -8,13 +8,14 @@ from tqdm import tqdm
 from safim.data_utils import load_dataset, stream_jsonl
 from safim.exec_utils import build_execeval, run_test
 
+
 def is_parsable(code: str) -> bool:
     try:
         ast.parse(code)
         return True
     except SyntaxError:
         return False
-        
+
 
 def get_function_call_params(node):
     positional_args = [ast.dump(arg) for arg in node.args]
@@ -45,18 +46,17 @@ def syntax_match(code1, code2, lang):
 
 
 def evaluate(
-    completion_type:str,
-    completion_path:str,
-    output_path:str,
-    language:str = None,
-    port:int = 5000
+        completion_type: str,
+        completion_path: str,
+        output_path: str,
+        language: str = None,
+        port: int = 5000
 ):
-
     build_execeval(port)
 
     completions = {completion["task_id"]: completion for completion in stream_jsonl(completion_path)}
     pass_cnt, total = 0, 0
-    results = []
+    results = dict()
     for problem in tqdm(load_dataset(completion_type)):
         if language is not None and problem["lang"] != language:
             continue
@@ -78,20 +78,31 @@ def evaluate(
                 else:
                     result = "WRONG_ANSWER"
                     passed = False
+
         if not completion['completion'].strip() and not passed:
             result = "EMPTY"
         if problem["lang"] == "python" and not passed:
             full_code = problem['eval_prompt'].replace("{{completion}}", completion['completion'])
             if "unit_tests" in problem and not is_parsable(full_code):
                 result = "COMPILATION_ERROR"
+
         pass_cnt += int(passed)
         total += 1
-        results.append({
-                "task_id": problem["task_id"], "result": result, "passed": passed, "check_result": 0
-        })
+        results[problem["task_id"]] = [{
+            "task_id": problem["task_id"],
+            "result": result,
+            "passed": passed
+        }]
 
+    pass_at_1 = pass_cnt / total * 100
     print(f"Pass {pass_cnt} / Total {total}")
-    print(f"Pass@1: {pass_cnt / total * 100 :.04f}%")
+    print(f"Pass@1: {pass_at_1 :.04f}%")
+
+    # save_eval_results
+    output_results = dict()
+    output_results["date"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+    output_results["pass_at_k"] = {"pass@1": pass_at_1}
+    output_results["eval"] = results
+
     with open(output_path, "w", encoding="utf-8") as f:
-        for r in results:
-            f.write(json.dumps(r) + "\n")
+        json.dump(output_results, f, indent=4)
