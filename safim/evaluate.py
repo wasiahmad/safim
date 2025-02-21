@@ -4,7 +4,7 @@ import re
 
 import tqdm
 from tqdm import tqdm
-
+from datetime import datetime
 from safim.data_utils import load_dataset, stream_jsonl
 from safim.exec_utils import build_execeval, run_test
 
