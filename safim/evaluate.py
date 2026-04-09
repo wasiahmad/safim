@@ -2,7 +2,6 @@ import ast
 import json
 import re
 
-import tqdm
 from tqdm import tqdm
 from datetime import datetime
 from safim.data_utils import load_dataset, stream_jsonl
@@ -60,11 +59,11 @@ def evaluate(
     for problem in tqdm(load_dataset(completion_type)):
         if language is not None and problem["lang"] != language:
             continue
-        if problem["task_id"] not in completions:
+        completion = completions.get(problem["task_id"])
+        if completion is None:
             result = "EMPTY"
             passed = False
         else:
-            completion = completions[problem["task_id"]]
             if "unit_tests" in problem and problem["unit_tests"]:
                 if completion['completion'] == problem["ground_truth"]:
                     result = "PASSED"
@@ -79,9 +78,13 @@ def evaluate(
                     result = "WRONG_ANSWER"
                     passed = False
 
-        if not completion['completion'].strip() and not passed:
+        if completion is not None and not completion['completion'].strip() and not passed:
             result = "EMPTY"
-        if problem["lang"] == "python" and not passed:
+        if (
+            completion is not None
+            and problem["lang"] == "python"
+            and not passed
+        ):
             full_code = problem['eval_prompt'].replace("{{completion}}", completion['completion'])
             if "unit_tests" in problem and not is_parsable(full_code):
                 result = "COMPILATION_ERROR"
