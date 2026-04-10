@@ -112,11 +112,16 @@ LANG_TO_COMPILER = {
 execeval: APICommunication = None
 
 
-def run_test(problem, completion):
+def run_test(problem, completion, client: Optional[APICommunication] = None):
     global execeval
+    api = client if client is not None else execeval
+    if api is None:
+        raise RuntimeError(
+            "No execution API client; call build_execeval(port) or pass client= to run_test."
+        )
     assert problem['task_id'] == completion['task_id']
     code = problem['eval_prompt'].replace("{{completion}}", completion['completion'])
-    result = execeval.execute_code(
+    result = api.execute_code(
         LANG_TO_COMPILER[problem['lang']], code, problem['unit_tests'], task_id=problem['task_id']
     )[0]
     if not (isinstance(result, list) and isinstance(result[0], dict)):

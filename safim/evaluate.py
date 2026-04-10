@@ -1,11 +1,15 @@
 import ast
 import json
 import re
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 
 from tqdm import tqdm
-from datetime import datetime
+
 from safim.data_utils import load_dataset, stream_jsonl
-from safim.exec_utils import build_execeval, run_test
+from safim import exec_utils
+from safim.exec_utils import APICommunication, build_execeval, run_test
 
 
 def is_parsable(code: str) -> bool:
@@ -44,68 +48,117 @@ def syntax_match(code1, code2, lang):
     return code1 == code2
 
 
+def _evaluate_one(problem, completion, client):
+    if completion is None:
+        result = "EMPTY"
+        passed = False
+    else:
+        if "unit_tests" in problem and problem["unit_tests"]:
+            if completion["completion"] == problem["ground_truth"]:
+                result = "PASSED"
+                passed = True
+            else:
+                result, passed = run_test(problem, completion, client=client)
+        else:
+            if syntax_match(
+                completion["completion"], problem["ground_truth"], problem["lang"]
+            ):
+                result = "EXACT_MATCH"
+                passed = True
+            else:
+                result = "WRONG_ANSWER"
+                passed = False
+
+    if completion is not None and not completion["completion"].strip() and not passed:
+        result = "EMPTY"
+    if (
+        completion is not None
+        and problem["lang"] == "python"
+        and not passed
+    ):
+        full_code = problem["eval_prompt"].replace(
+            "{{completion}}", completion["completion"]
+        )
+        if "unit_tests" in problem and not is_parsable(full_code):
+            result = "COMPILATION_ERROR"
+
+    tid = problem["task_id"]
+    return tid, result, passed
+
+
+def _make_thread_local_client(port: int):
+    tls = threading.local()
+
+    def get_client():
+        if not hasattr(tls, "api"):
+            tls.api = APICommunication(server_url=f"http://localhost:{port}")
+        return tls.api
+
+    return get_client
+
+
 def evaluate(
         completion_type: str,
         completion_path: str,
         output_path: str,
         language: str = None,
-        port: int = 5000
+        port: int = 5000,
+        max_workers: int = 1,
 ):
+    if max_workers < 1:
+        raise ValueError("max_workers must be >= 1")
+
     build_execeval(port)
 
-    completions = {completion["task_id"]: completion for completion in stream_jsonl(completion_path)}
-    pass_cnt, total = 0, 0
-    results = dict()
-    for problem in tqdm(load_dataset(completion_type)):
-        if language is not None and problem["lang"] != language:
-            continue
-        completion = completions.get(problem["task_id"])
-        if completion is None:
-            result = "EMPTY"
-            passed = False
-        else:
-            if "unit_tests" in problem and problem["unit_tests"]:
-                if completion['completion'] == problem["ground_truth"]:
-                    result = "PASSED"
-                    passed = True
-                else:
-                    result, passed = run_test(problem, completion)
-            else:
-                if syntax_match(completion['completion'], problem["ground_truth"], problem["lang"]):
-                    result = "EXACT_MATCH"
-                    passed = True
-                else:
-                    result = "WRONG_ANSWER"
-                    passed = False
+    completions = {
+        completion["task_id"]: completion
+        for completion in stream_jsonl(completion_path)
+    }
+    problems = [
+        p
+        for p in load_dataset(completion_type)
+        if language is None or p["lang"] == language
+    ]
+    total = len(problems)
+    results = {}
+    pass_cnt = 0
 
-        if completion is not None and not completion['completion'].strip() and not passed:
-            result = "EMPTY"
-        if (
-            completion is not None
-            and problem["lang"] == "python"
-            and not passed
-        ):
-            full_code = problem['eval_prompt'].replace("{{completion}}", completion['completion'])
-            if "unit_tests" in problem and not is_parsable(full_code):
-                result = "COMPILATION_ERROR"
+    if max_workers == 1:
+        client = exec_utils.execeval
+        for problem in tqdm(problems):
+            completion = completions.get(problem["task_id"])
+            tid, result, passed = _evaluate_one(problem, completion, client)
+            pass_cnt += int(passed)
+            results[tid] = [
+                {"task_id": tid, "result": result, "passed": passed}
+            ]
+    else:
+        get_client = _make_thread_local_client(port)
 
-        pass_cnt += int(passed)
-        total += 1
-        results[problem["task_id"]] = [{
-            "task_id": problem["task_id"],
-            "result": result,
-            "passed": passed
-        }]
+        def _worker(problem):
+            completion = completions.get(problem["task_id"])
+            return _evaluate_one(problem, completion, get_client())
 
-    pass_at_1 = pass_cnt / total * 100
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = [pool.submit(_worker, p) for p in problems]
+            for fut in tqdm(as_completed(futures), total=len(futures)):
+                tid, result, passed = fut.result()
+                pass_cnt += int(passed)
+                results[tid] = [
+                    {"task_id": tid, "result": result, "passed": passed}
+                ]
+
+    pass_at_1 = (pass_cnt / total * 100) if total else 0.0
     print(f"Pass {pass_cnt} / Total {total}")
     print(f"Pass@1: {pass_at_1 :.04f}%")
 
-    # save_eval_results
+    # save_eval_results (preserve problem order in output JSON)
     output_results = dict()
     output_results["date"] = datetime.now().strftime("%Y-%m-%d %H:%M")
     output_results["pass_at_k"] = {"pass@1": pass_at_1}
-    output_results["eval"] = results
+    output_results["eval"] = {
+        p["task_id"]: results[p["task_id"]] for p in problems
+    }
 
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(output_results, f, indent=4)
