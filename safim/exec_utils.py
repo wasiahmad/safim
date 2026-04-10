@@ -1,8 +1,12 @@
+import os
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import List, Optional, Tuple, Union
 
 import requests
+
+_HTTP_TIMEOUT = os.environ.get("SAFIM_HTTP_TIMEOUT_SEC")
+_REQUEST_TIMEOUT = float(_HTTP_TIMEOUT) if _HTTP_TIMEOUT else None
 
 
 class ExecOutcome(Enum):
@@ -52,7 +56,9 @@ class APICommunication:
         self._session.close()
 
     def get_runtimes(self):
-        return self._session.get(self.get_runtimes_url).json()
+        return self._session.get(
+            self.get_runtimes_url, timeout=_REQUEST_TIMEOUT
+        ).json()
 
     def execute_code(
         self,
@@ -92,7 +98,11 @@ class APICommunication:
             use_sanitizer=use_sanitizer, )
         try:
             json_response = self._session.post(
-                self.execute_code_url, json=request_body, headers={"Content-Type": "application/json"}, ).json()
+                self.execute_code_url,
+                json=request_body,
+                headers={"Content-Type": "application/json"},
+                timeout=_REQUEST_TIMEOUT,
+            ).json()
         except requests.exceptions.JSONDecodeError:
             json_response = {
                 "task_id": task_id,
@@ -120,9 +130,15 @@ def run_test(problem, completion, client: Optional[APICommunication] = None):
             "No execution API client; call build_execeval(port) or pass client= to run_test."
         )
     assert problem['task_id'] == completion['task_id']
+    compiler = LANG_TO_COMPILER.get(problem["lang"])
+    if compiler is None:
+        raise KeyError(
+            f"Unsupported problem language {problem['lang']!r}; "
+            f"expected one of {sorted(LANG_TO_COMPILER)}"
+        )
     code = problem['eval_prompt'].replace("{{completion}}", completion['completion'])
     result = api.execute_code(
-        LANG_TO_COMPILER[problem['lang']], code, problem['unit_tests'], task_id=problem['task_id']
+        compiler, code, problem['unit_tests'], task_id=problem['task_id']
     )[0]
     if not (isinstance(result, list) and isinstance(result[0], dict)):
         print(result)

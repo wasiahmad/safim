@@ -1,4 +1,41 @@
+import os
+from typing import Dict
+
 from tree_sitter import Language, Parser
+
+# Upstream SAFIM builds a shared library via Language.build_library; set this to that
+# .so path when using syntax-aware post-processors (truncate_line_until_*).
+_TS_LIB_PATH = os.environ.get(
+    "SAFIM_TREE_SITTER_SO",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "tree_sitter.so"),
+)
+_TS_LANG: Dict[str, Language] = {}
+_PARSERS: Dict[str, Parser] = {}
+_TS_LANG_NAME = {
+    "python": "python",
+    "java": "java",
+    "cpp": "cpp",
+    "csharp": "c_sharp",
+}
+
+
+def get_parser(lang: str) -> Parser:
+    """Return a tree-sitter Parser for ``lang`` (requires built ``tree_sitter.so``)."""
+    if lang not in _TS_LANG_NAME:
+        raise KeyError(f"unsupported language for tree-sitter: {lang!r}")
+    if lang not in _TS_LANG:
+        if not os.path.isfile(_TS_LIB_PATH):
+            raise FileNotFoundError(
+                f"Tree-sitter grammar library not found at {_TS_LIB_PATH!r}. "
+                "Build it from the official SAFIM repo (see ast_utils.Language.build_library) "
+                "or set SAFIM_TREE_SITTER_SO to the built shared library path."
+            )
+        _TS_LANG[lang] = Language(_TS_LIB_PATH, _TS_LANG_NAME[lang])
+    if lang not in _PARSERS:
+        parser = Parser()
+        parser.set_language(_TS_LANG[lang])
+        _PARSERS[lang] = parser
+    return _PARSERS[lang]
 
 
 class ASTVisitor:
