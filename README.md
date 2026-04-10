@@ -45,6 +45,7 @@ evaluate(
 - Before scoring, the completion string is trimmed with the matching rule from upstream SAFIM (`safim.postprocess_utils`).
 - For **`block`**, every JSONL object must also include **`prefix`** and **`suffix`** (code before and after the completion; equivalent to splitting `eval_prompt` on `{{completion}}`). Values must not be JSON `null`.
 - **`block`** post-processing uses **tree-sitter**; you need a built grammar shared library (see [Tree-sitter](#tree-sitter) below).
+- When **`post_process=True`**, each entry under **`eval`** in the output JSON also includes **`completion_before`** and **`completion_after`** (JSON `null` if there was no matching completion row for that task).
 
 **Parallel evaluation** (`max_workers > 1`):
 

@@ -85,6 +85,9 @@ def _maybe_postprocess_completion(problem, completion, post_process, dataset_com
 
 
 def _evaluate_one(problem, completion, client, post_process=False, dataset_completion_type=None):
+    completion_before = (
+        completion.get("completion") if completion is not None else None
+    )
     completion = _maybe_postprocess_completion(
         problem, completion, post_process, dataset_completion_type
     )
@@ -122,7 +125,13 @@ def _evaluate_one(problem, completion, client, post_process=False, dataset_compl
             result = "COMPILATION_ERROR"
 
     tid = problem["task_id"]
-    return tid, result, passed
+    row = {"task_id": tid, "result": result, "passed": passed}
+    if post_process:
+        row["completion_before"] = completion_before
+        row["completion_after"] = (
+            completion.get("completion") if completion is not None else None
+        )
+    return tid, row
 
 
 def _process_pool_init(port: int) -> None:
@@ -167,15 +176,15 @@ def _run_sequential(
     pass_cnt = 0
     for problem in tqdm(problems):
         completion = completions.get(problem["task_id"])
-        tid, result, passed = _evaluate_one(
+        tid, row = _evaluate_one(
             problem,
             completion,
             client,
             post_process=post_process,
             dataset_completion_type=dataset_completion_type,
         )
-        pass_cnt += int(passed)
-        results[tid] = [{"task_id": tid, "result": result, "passed": passed}]
+        pass_cnt += int(row["passed"])
+        results[tid] = [row]
     return results, pass_cnt
 
 
@@ -195,9 +204,9 @@ def _run_parallel(
     ) as executor:
         futures = [executor.submit(_process_pool_worker, t) for t in tasks]
         for fut in tqdm(as_completed(futures), total=len(futures)):
-            tid, result, passed = fut.result()
-            pass_cnt += int(passed)
-            results[tid] = [{"task_id": tid, "result": result, "passed": passed}]
+            tid, row = fut.result()
+            pass_cnt += int(row["passed"])
+            results[tid] = [row]
     return results, pass_cnt
 
 
