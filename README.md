@@ -58,12 +58,14 @@ evaluate(
 | Variable | Purpose |
 |----------|---------|
 | `SAFIM_MAX_WORKERS_CAP` | Upper bound on process pool size (default `32`) when `max_workers` is large. |
-| `SAFIM_TREE_SITTER_SO` | Path to the **tree-sitter** grammar `.so` used for `block` post-processing. If unset, `safim/tree_sitter.so` next to the installed package is tried. |
+| `SAFIM_TREE_SITTER_SO` | Path to the **tree-sitter** grammar `.so` used for `block` post-processing (preferred). |
+| `SAFIM_TREE_SITTER_LIB` | Same as above (alternate env name, e.g. NeMo execeval Docker). Checked only if `SAFIM_TREE_SITTER_SO` is unset. |
+| *(default)* | If neither env var is set, `safim/tree_sitter.so` next to the installed package is tried. |
 | `SAFIM_HTTP_TIMEOUT_SEC` | Optional HTTP timeout (seconds) for execution API `GET`/`POST`. If unset, no timeout (previous behavior). |
 
 ### Tree-sitter
 
-Upstream SAFIM builds a single shared library containing Python, Java, C++, and C# grammars (`Language.build_library` in their `ast_utils`). Point **`SAFIM_TREE_SITTER_SO`** at that file, or place it as `tree_sitter.so` beside `safim/ast_utils.py` after install. Without it, **`block`** post-processing will fail with a clear `FileNotFoundError`.
+Upstream SAFIM builds a single shared library containing Python, Java, C++, and C# grammars (`Language.build_library` in their `ast_utils`). Set **`SAFIM_TREE_SITTER_SO`** or **`SAFIM_TREE_SITTER_LIB`** to that file, or place it as `tree_sitter.so` beside `safim/ast_utils.py` after install. Without it, **`block`** post-processing will fail with a clear `FileNotFoundError`.
 
 ### Example driver
 

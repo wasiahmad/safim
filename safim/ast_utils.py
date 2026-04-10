@@ -3,12 +3,6 @@ from typing import Dict
 
 from tree_sitter import Language, Parser
 
-# Upstream SAFIM builds a shared library via Language.build_library; set this to that
-# .so path when using syntax-aware post-processors (truncate_line_until_*).
-_TS_LIB_PATH = os.environ.get(
-    "SAFIM_TREE_SITTER_SO",
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "tree_sitter.so"),
-)
 _TS_LANG: Dict[str, Language] = {}
 _PARSERS: Dict[str, Parser] = {}
 _TS_LANG_NAME = {
@@ -19,21 +13,48 @@ _TS_LANG_NAME = {
 }
 
 
+def _tree_sitter_lib_path() -> str:
+    """Path to the combined grammar ``.so`` (``Language.build_library`` output).
+
+    Resolution order:
+
+    1. ``SAFIM_TREE_SITTER_SO`` — preferred name.
+    2. ``SAFIM_TREE_SITTER_LIB`` — legacy / NeMo execeval Docker (same file).
+    3. ``<package>/tree_sitter.so`` next to this module (optional vendored build).
+    """
+    default_pkg = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tree_sitter.so")
+    return (
+        os.environ.get("SAFIM_TREE_SITTER_SO")
+        or os.environ.get("SAFIM_TREE_SITTER_LIB")
+        or default_pkg
+    )
+
+
+def _attach_language(parser: Parser, language: Language) -> None:
+    """``tree-sitter`` 0.20.x uses ``set_language``; 0.22+ uses ``parser.language = …``."""
+    set_lang = getattr(parser, "set_language", None)
+    if callable(set_lang):
+        set_lang(language)
+    else:
+        parser.language = language
+
+
 def get_parser(lang: str) -> Parser:
-    """Return a tree-sitter Parser for ``lang`` (requires built ``tree_sitter.so``)."""
+    """Return a tree-sitter Parser for ``lang`` (requires built combined grammar ``.so``)."""
     if lang not in _TS_LANG_NAME:
         raise KeyError(f"unsupported language for tree-sitter: {lang!r}")
     if lang not in _TS_LANG:
-        if not os.path.isfile(_TS_LIB_PATH):
+        lib_path = _tree_sitter_lib_path()
+        if not os.path.isfile(lib_path):
             raise FileNotFoundError(
-                f"Tree-sitter grammar library not found at {_TS_LIB_PATH!r}. "
-                "Build it from the official SAFIM repo (see ast_utils.Language.build_library) "
-                "or set SAFIM_TREE_SITTER_SO to the built shared library path."
+                f"Tree-sitter grammar library not found at {lib_path!r}. "
+                "Build it from the official SAFIM repo (see Language.build_library in your setup) "
+                "and set SAFIM_TREE_SITTER_SO or SAFIM_TREE_SITTER_LIB to that ``.so`` path."
             )
-        _TS_LANG[lang] = Language(_TS_LIB_PATH, _TS_LANG_NAME[lang])
+        _TS_LANG[lang] = Language(lib_path, _TS_LANG_NAME[lang])
     if lang not in _PARSERS:
         parser = Parser()
-        parser.set_language(_TS_LANG[lang])
+        _attach_language(parser, _TS_LANG[lang])
         _PARSERS[lang] = parser
     return _PARSERS[lang]
 
