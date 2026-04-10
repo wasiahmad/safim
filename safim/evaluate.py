@@ -1,15 +1,20 @@
 import ast
 import json
+import os
 import re
-import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import warnings
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime
+from typing import Optional
 
 from tqdm import tqdm
 
 from safim.data_utils import load_dataset, stream_jsonl
 from safim import exec_utils
 from safim.exec_utils import APICommunication, build_execeval, run_test
+
+# Set in each process by ProcessPoolExecutor initializer (pickle-safe worker path).
+_process_client: Optional[APICommunication] = None
 
 
 def is_parsable(code: str) -> bool:
@@ -86,15 +91,97 @@ def _evaluate_one(problem, completion, client):
     return tid, result, passed
 
 
-def _make_thread_local_client(port: int):
-    tls = threading.local()
+def _process_pool_init(port: int) -> None:
+    global _process_client
+    _process_client = APICommunication(server_url=f"http://localhost:{port}")
 
-    def get_client():
-        if not hasattr(tls, "api"):
-            tls.api = APICommunication(server_url=f"http://localhost:{port}")
-        return tls.api
 
-    return get_client
+def _process_pool_worker(task: tuple) -> tuple:
+    """Top-level for pickling; task is (problem, completion_or_none)."""
+    problem, completion = task
+    if _process_client is None:
+        raise RuntimeError("process pool client not initialized")
+    return _evaluate_one(problem, completion, _process_client)
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def _capped_pool_workers(requested: int) -> int:
+    """Cap process count (pid / memory limits in containers)."""
+    cap = max(1, _env_int("SAFIM_MAX_WORKERS_CAP", 32))
+    return min(requested, cap)
+
+
+def _run_sequential(problems, completions, client):
+    results = {}
+    pass_cnt = 0
+    for problem in tqdm(problems):
+        completion = completions.get(problem["task_id"])
+        tid, result, passed = _evaluate_one(problem, completion, client)
+        pass_cnt += int(passed)
+        results[tid] = [{"task_id": tid, "result": result, "passed": passed}]
+    return results, pass_cnt
+
+
+def _run_parallel(problems, completions, port, pool_workers):
+    tasks = [(p, completions.get(p["task_id"])) for p in problems]
+    results = {}
+    pass_cnt = 0
+    with ProcessPoolExecutor(
+        max_workers=pool_workers,
+        initializer=_process_pool_init,
+        initargs=(port,),
+    ) as executor:
+        futures = [executor.submit(_process_pool_worker, t) for t in tasks]
+        for fut in tqdm(as_completed(futures), total=len(futures)):
+            tid, result, passed = fut.result()
+            pass_cnt += int(passed)
+            results[tid] = [{"task_id": tid, "result": result, "passed": passed}]
+    return results, pass_cnt
+
+
+def _is_pool_resource_failure(exc: BaseException) -> bool:
+    if isinstance(exc, RuntimeError):
+        msg = str(exc).lower()
+        return "can't start new thread" in msg or "unable to start" in msg
+    if isinstance(exc, OSError):
+        # EAGAIN, ENOMEM, EMFILE — common when hitting pid / fd / memory limits
+        return exc.errno in (11, 12, 24)
+    return False
+
+
+def _run_parallel_with_pool_backoff(problems, completions, port, pool_workers):
+    """Retry with fewer worker processes when the OS/container refuses new workers."""
+    w = pool_workers
+    while True:
+        if w <= 1:
+            warnings.warn(
+                "Could not create a process pool; running sequentially "
+                "(tight pid/fd limits — use max_workers=1 or raise cgroup limits).",
+                UserWarning,
+                stacklevel=3,
+            )
+            return _run_sequential(problems, completions, exec_utils.execeval)
+        try:
+            return _run_parallel(problems, completions, port, w)
+        except (RuntimeError, OSError) as e:
+            if not _is_pool_resource_failure(e):
+                raise
+            prev = w
+            w = max(1, w // 2)
+            warnings.warn(
+                f"Process pool size {prev} failed ({e!r}); retrying with {w} workers.",
+                UserWarning,
+                stacklevel=3,
+            )
 
 
 def evaluate(
@@ -105,6 +192,13 @@ def evaluate(
         port: int = 5000,
         max_workers: int = 1,
 ):
+    """
+    When ``max_workers`` > 1, problems are scored with ``ProcessPoolExecutor``
+    (separate processes, one HTTP client per worker — similar to LiveCodeBench).
+
+    On Windows (spawn), run evaluation from a script guarded with
+    ``if __name__ == "__main__":`` so worker processes can import this module.
+    """
     if max_workers < 1:
         raise ValueError("max_workers must be >= 1")
 
@@ -120,33 +214,24 @@ def evaluate(
         if language is None or p["lang"] == language
     ]
     total = len(problems)
-    results = {}
-    pass_cnt = 0
-
     if max_workers == 1:
-        client = exec_utils.execeval
-        for problem in tqdm(problems):
-            completion = completions.get(problem["task_id"])
-            tid, result, passed = _evaluate_one(problem, completion, client)
-            pass_cnt += int(passed)
-            results[tid] = [
-                {"task_id": tid, "result": result, "passed": passed}
-            ]
+        results, pass_cnt = _run_sequential(problems, completions, exec_utils.execeval)
     else:
-        get_client = _make_thread_local_client(port)
-
-        def _worker(problem):
-            completion = completions.get(problem["task_id"])
-            return _evaluate_one(problem, completion, get_client())
-
-        with ThreadPoolExecutor(max_workers=max_workers) as pool:
-            futures = [pool.submit(_worker, p) for p in problems]
-            for fut in tqdm(as_completed(futures), total=len(futures)):
-                tid, result, passed = fut.result()
-                pass_cnt += int(passed)
-                results[tid] = [
-                    {"task_id": tid, "result": result, "passed": passed}
-                ]
+        pool_workers = _capped_pool_workers(max_workers)
+        if pool_workers < max_workers:
+            warnings.warn(
+                f"max_workers={max_workers} capped to {pool_workers} "
+                f"(set SAFIM_MAX_WORKERS_CAP to raise the limit).",
+                stacklevel=2,
+            )
+        if pool_workers == 1:
+            results, pass_cnt = _run_sequential(
+                problems, completions, exec_utils.execeval
+            )
+        else:
+            results, pass_cnt = _run_parallel_with_pool_backoff(
+                problems, completions, port, pool_workers
+            )
 
     pass_at_1 = (pass_cnt / total * 100) if total else 0.0
     print(f"Pass {pass_cnt} / Total {total}")
